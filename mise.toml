@@ -44,6 +44,23 @@ for os in darwin linux; do
 done
 """
 
+# Builds for the host only. Override the target dir: BIN_DIR=/usr/local/bin
+# (needs write access there). Not `go install`: that names the binary format-env.
+[tasks."cli:install"]
+description = "Build fenv for this machine and install it into ~/.local/bin"
+run = """
+set -e
+bin_dir=${BIN_DIR:-$HOME/.local/bin}
+mkdir -p "$bin_dir"
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$bin_dir/fenv" fenv.go
+echo "installed $bin_dir/fenv"
+case ":$PATH:" in
+  *":$bin_dir:"*) ;;
+  *) echo "warning: $bin_dir is not on PATH; add to ~/.bashrc or ~/.zshrc:"
+     echo "  export PATH=\\"$bin_dir:\\$PATH\\"" ;;
+esac
+"""
+
 [tasks.clean]
 description = "Delete build artifacts"
 run = "rm -rf bin"
