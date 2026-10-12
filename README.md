@@ -8,24 +8,44 @@ format-env is a Go command-line utility to generate and format environment files
 - Allows specifying the template path and stage dynamically through command-line arguments.
 
 # Installation
-## Option 1: Donwload binary file
+Prebuilt binaries are published for macOS and Linux (Ubuntu, Debian, …) on
+`amd64` and `arm64`.
+
+## Option 1: mise (recommended)
+With [mise](https://mise.jdx.dev) installed, this picks the right binary for
+your OS and CPU and puts `fenv` on your `PATH`:
 ```sh
-# for macos arm64 
-wget https://github.com/cuongnbms/format-env/releases/download/v1.1.0/fenv_darwin_arm64 -O fenv
-sudo mv fenv /usr/local/bin/
-sudo chmod +x /usr/local/bin/fenv
+mise use -g github:cuongnbms/format-env
+fenv            # prints usage
 ```
 
-## Option 2: Compile from source
-To build and install the utility, make sure you have Go installed, and then run:
-```
-go build -o fenv fenv.go
+Install mise first if needed (Ubuntu or macOS):
+```sh
+curl https://mise.run | sh
+echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc   # zsh: ~/.zshrc and "activate zsh"
 ```
 
-Move the binary to your $PATH for easy access:
+## Option 2: Download binary file
+```sh
+VERSION=v1.2.0
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')                     # linux | darwin
+ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/') # amd64 | arm64
+wget "https://github.com/cuongnbms/format-env/releases/download/${VERSION}/fenv_${OS}_${ARCH}" -O fenv
+sudo install -m 0755 fenv /usr/local/bin/fenv
 ```
-sudo mv fenv /usr/local/bin/
-sudo chmod +x /usr/local/bin/fenv
+
+## Option 3: Compile from source
+With [mise](https://mise.jdx.dev) installed (it provides the pinned Go toolchain):
+```sh
+mise run build                     # bin/fenv_{darwin,linux}_{amd64,arm64}
+sudo install -m 0755 "bin/fenv_$(go env GOOS)_$(go env GOARCH)" /usr/local/bin/fenv
+```
+
+# Development
+```sh
+mise run ci      # gofmt check, go vet, tests
+mise run fmt     # rewrite sources with gofmt
+mise run build   # release binaries in bin/
 ```
 # Usage
 
