@@ -37,8 +37,8 @@ sudo install -m 0755 fenv /usr/local/bin/fenv
 ## Option 3: Compile from source
 With [mise](https://mise.jdx.dev) installed (it provides the pinned Go toolchain):
 ```sh
-mise run build                     # bin/fenv_{darwin,linux}_{amd64,arm64}
-sudo install -m 0755 "bin/fenv_$(go env GOOS)_$(go env GOARCH)" /usr/local/bin/fenv
+mise run cli:install                    # installs ~/.local/bin/fenv
+BIN_DIR=$HOME/bin mise run cli:install  # any other directory you can write to
 ```
 
 # Development
