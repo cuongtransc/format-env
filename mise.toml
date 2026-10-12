@@ -1,0 +1,49 @@
+[tools]
+go = "1.27"
+
+[tasks.test]
+description = "Run formatter unit tests"
+run = "go test ./..."
+
+[tasks.lint]
+description = "Static checks, read-only"
+run = "go vet ./..."
+
+[tasks.fmt]
+description = "Rewrite Go sources with gofmt"
+run = "gofmt -w ."
+
+[tasks."fmt:check"]
+description = "Fail if any Go source is not gofmt-clean"
+run = """
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+  echo "gofmt needed (run: mise run fmt):"
+  echo "$unformatted"
+  exit 1
+fi
+"""
+
+[tasks.ci]
+description = "Gate before pushing: format check, lint, tests"
+depends = ["fmt:check", "lint", "test"]
+run = "echo 'ci passed'"
+
+# Asset names must stay fenv_<os>_<arch>: `mise use github:cuongnbms/format-env`
+# picks the release asset by that suffix and installs it as `fenv`.
+[tasks.build]
+description = "Cross-compile release binaries into bin/"
+run = """
+set -e
+mkdir -p bin
+for os in darwin linux; do
+  for arch in amd64 arm64; do
+    CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags="-s -w" -o "bin/fenv_${os}_${arch}" fenv.go
+    echo "built bin/fenv_${os}_${arch}"
+  done
+done
+"""
+
+[tasks.clean]
+description = "Delete build artifacts"
+run = "rm -rf bin"
