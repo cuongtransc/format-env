@@ -1,0 +1,8 @@
+#!/bin/sh
+# Runs the gate before every commit. Clones without the global ct-hook-dispatch
+# still reach us with GIT_* set; drop them so tests that run git elsewhere
+# cannot write to this repository.
+for v in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+  unset "$v"
+done
+exec mise run ci
