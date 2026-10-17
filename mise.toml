@@ -45,7 +45,7 @@ fi
 """
 
 [tasks.ci]
-description = "Gate before pushing: format check, lint, tests"
+description = "Read-only gate: format check, lint, tests"
 depends = ["fmt:check", "lint", "test"]
 run = "echo 'ci passed'"
 
