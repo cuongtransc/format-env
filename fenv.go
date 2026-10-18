@@ -19,6 +19,10 @@ import (
 	"text/template"
 )
 
+// version is stamped at build time: -ldflags "-X main.version=<git describe>"
+// (mise run build / cli:install); a plain `go build` says dev.
+var version = "dev"
+
 // Exit codes: 1 = a check found something (secret-like value, missing key),
 // 2 = usage or an error that left the stage file untouched.
 const (
@@ -257,6 +261,7 @@ func missingKeys(tmpl string, keys []string) []string {
 }
 
 const usage = `Usage:
+  fenv --version                          print the version
   fenv [--dry-run] <env_dir> <stages>     render <env_dir>/_template.env into <env_dir>/<stage>.env
   fenv --check-template <env_dir>         fail if a secret-like key has a value in the template
   fenv --missing <keys_file|-> <env_dir>  list the keys (one per line) the template does not declare`
@@ -268,8 +273,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	dryRun := fl.Bool("dry-run", false, "report key changes, write nothing")
 	checkTemplate := fl.Bool("check-template", false, "only validate the template's secret-like keys")
 	missing := fl.String("missing", "", "file of keys to look up in the template (- for stdin)")
+	showVersion := fl.Bool("version", false, "print the version")
 	if err := fl.Parse(args); err != nil {
 		return exitError
+	}
+	if *showVersion {
+		fmt.Fprintf(stdout, "fenv %s\n", version)
+		return 0
 	}
 	if fl.NArg() < 1 {
 		// No arguments prints the usage and succeeds, as fenv always did (the

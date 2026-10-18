@@ -174,3 +174,23 @@ func TestMissingKeysReadFromStdin(t *testing.T) {
 		t.Fatalf("run(--missing -) = %d, %q", code, out.String())
 	}
 }
+
+func TestVersionFlagPrintsTheBuildVersion(t *testing.T) {
+	old := version
+	version = "v9.9.9"
+	defer func() { version = old }()
+
+	var out bytes.Buffer
+	if code := run([]string{"--version"}, strings.NewReader(""), &out, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("run(--version) = %d, want 0", code)
+	}
+	if out.String() != "fenv v9.9.9\n" {
+		t.Fatalf("--version printed %q", out.String())
+	}
+}
+
+func TestAnUnstampedBuildSaysDev(t *testing.T) {
+	if version != "dev" {
+		t.Fatalf("default version = %q, want dev (release builds stamp it with -ldflags)", version)
+	}
+}

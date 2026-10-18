@@ -55,10 +55,12 @@ run = "echo 'ci passed'"
 description = "Cross-compile release binaries into bin/"
 run = """
 set -e
+# The tag on HEAD for a release build (v1.2.1), else the nearest tag plus commits.
+version=$(git describe --tags --always --dirty)
 mkdir -p bin
 for os in darwin linux; do
   for arch in amd64 arm64; do
-    CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags="-s -w" -o "bin/fenv_${os}_${arch}" fenv.go
+    CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags="-s -w -X main.version=$version" -o "bin/fenv_${os}_${arch}" fenv.go
     echo "built bin/fenv_${os}_${arch}"
   done
 done
@@ -72,7 +74,7 @@ run = """
 set -e
 bin_dir=${BIN_DIR:-$HOME/.local/bin}
 mkdir -p "$bin_dir"
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$bin_dir/fenv" fenv.go
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(git describe --tags --always --dirty)" -o "$bin_dir/fenv" fenv.go
 echo "installed $bin_dir/fenv"
 case ":$PATH:" in
   *":$bin_dir:"*) ;;
