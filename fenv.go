@@ -59,7 +59,8 @@ func readConfigFile(filePath string) (map[string]string, error) {
 }
 
 // parseEnv returns the KEY=value pairs of an env file and the keys in file order.
-// Comments and blank lines are skipped; the last value of a key wins.
+// Comments, blank lines and lines that are not KEY=value are skipped; an `export `
+// prefix is the same key; the last value of a key wins.
 func parseEnv(text string) (map[string]string, []string) {
 	config := make(map[string]string)
 	var order []string
@@ -69,15 +70,15 @@ func parseEnv(text string) (map[string]string, []string) {
 		if len(line) == 0 || strings.HasPrefix(line, "#") {
 			continue
 		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
+		m := keyLine.FindStringSubmatch(line)
+		if m == nil {
 			continue
 		}
-		key := strings.TrimSpace(parts[0])
+		key := m[1]
 		if _, seen := config[key]; !seen {
 			order = append(order, key)
 		}
-		config[key] = strings.TrimSpace(parts[1])
+		config[key] = strings.TrimSpace(m[2])
 	}
 	return config, order
 }
