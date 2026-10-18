@@ -64,6 +64,11 @@ for os in darwin linux; do
     echo "built bin/fenv_${os}_${arch}"
   done
 done
+# Upload with the binaries: `sha256sum -c sha256sums.txt` verifies a download, and
+# provisioning (ansible get_url checksum=) pins these values.
+if command -v sha256sum >/dev/null; then sum=sha256sum; else sum="shasum -a 256"; fi
+(cd bin && $sum fenv_darwin_amd64 fenv_darwin_arm64 fenv_linux_amd64 fenv_linux_arm64 > sha256sums.txt)
+echo "wrote bin/sha256sums.txt"
 """
 
 # Builds for the host only. Override the target dir: BIN_DIR=/usr/local/bin
