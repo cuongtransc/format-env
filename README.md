@@ -27,10 +27,12 @@ echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc   # zsh: ~/.zshrc 
 
 ## Option 2: Download binary file
 ```sh
-VERSION=v1.2.0
+VERSION=v1.2.1
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')                     # linux | darwin
 ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/') # amd64 | arm64
 wget "https://github.com/cuongtransc/format-env/releases/download/${VERSION}/fenv_${OS}_${ARCH}" -O fenv
+wget "https://github.com/cuongtransc/format-env/releases/download/${VERSION}/sha256sums.txt"
+grep " fenv_${OS}_${ARCH}$" sha256sums.txt | sed "s/fenv_${OS}_${ARCH}/fenv/" | sha256sum -c -   # macOS: shasum -a 256 -c -
 sudo install -m 0755 fenv /usr/local/bin/fenv
 ```
 
