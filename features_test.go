@@ -194,3 +194,31 @@ func TestAnUnstampedBuildSaysDev(t *testing.T) {
 		t.Fatalf("default version = %q, want dev (release builds stamp it with -ldflags)", version)
 	}
 }
+
+func TestStageLinesWithExportKeepTheirValue(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "_template.env"), "A={{ .A }}\nB={{ df .B \"d\" }}\n")
+	writeTestFile(t, filepath.Join(dir, "prod.env"), "export A=kept\nexport  B = also\n")
+
+	var out bytes.Buffer
+	if err := renderStage(dir, "prod", true, &out); err != nil {
+		t.Fatalf("renderStage() error = %v", err)
+	}
+	// `export KEY=` is the same key as `KEY=`: nothing is removed or changed.
+	if want := filepath.Join(dir, "prod.env") + ": +0 -0 ~0 (dry run)\n"; out.String() != want {
+		t.Fatalf("report = %q, want %q", out.String(), want)
+	}
+	if err := renderStage(dir, "prod", false, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "prod.env")); string(got) != "A=kept\nB=also\n" {
+		t.Fatalf("rendered = %q", got)
+	}
+}
+
+func TestLinesThatAreNotKeyValuePairsAreSkipped(t *testing.T) {
+	got, _ := parseEnv("export\nmy-key=1\n9X=2\nOK=3\n")
+	if !reflect.DeepEqual(got, map[string]string{"OK": "3"}) {
+		t.Fatalf("parseEnv() = %#v", got)
+	}
+}
