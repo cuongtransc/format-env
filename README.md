@@ -76,6 +76,7 @@ its mode, owner and group, and a new one is created `0600`.
 
 ## Checks
 ```
+fenv --version                      # print the version (e.g. fenv v1.2.1)
 fenv --dry-run env prod             # report the key changes, write nothing
 fenv --check-template env           # exit 1 if a secret-like key (…SECRET, …TOKEN, …PASS, …_KEY, …)
                                     #   has a value or a df default instead of {{ .KEY }}
