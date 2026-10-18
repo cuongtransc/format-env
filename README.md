@@ -15,7 +15,7 @@ Prebuilt binaries are published for macOS and Linux (Ubuntu, Debian, …) on
 With [mise](https://mise.jdx.dev) installed, this picks the right binary for
 your OS and CPU and puts `fenv` on your `PATH`:
 ```sh
-mise use -g github:cuongnbms/format-env
+mise use -g github:cuongtransc/format-env
 fenv            # prints usage
 ```
 
@@ -30,7 +30,7 @@ echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc   # zsh: ~/.zshrc 
 VERSION=v1.2.0
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')                     # linux | darwin
 ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/') # amd64 | arm64
-wget "https://github.com/cuongnbms/format-env/releases/download/${VERSION}/fenv_${OS}_${ARCH}" -O fenv
+wget "https://github.com/cuongtransc/format-env/releases/download/${VERSION}/fenv_${OS}_${ARCH}" -O fenv
 sudo install -m 0755 fenv /usr/local/bin/fenv
 ```
 
@@ -69,6 +69,22 @@ Example
 fenv env dev,staging,prod
 ```
 
+Each render prints the keys it adds, removes and changes (names only, never
+values), e.g. `env/prod.env: +1 -0 ~0` then `  + NEW_KEY`. The write is atomic
+(a template error leaves the stage file untouched); an existing stage file keeps
+its mode, owner and group, and a new one is created `0600`.
+
+## Checks
+```
+fenv --dry-run env prod             # report the key changes, write nothing
+fenv --check-template env           # exit 1 if a secret-like key (…SECRET, …TOKEN, …PASS, …_KEY, …)
+                                    #   has a value or a df default instead of {{ .KEY }}
+some-key-extractor | fenv --missing - env
+                                    # print, in byte order, the keys the template does not
+                                    #   declare (`KEY=` or `# KEY=`); exit 1 if any
+```
+Exit codes: 0 ok, 1 a check found something, 2 usage or an error (nothing written).
+
 # Pre-commit
 
 This repository can be used as a remote hook with the
@@ -77,7 +93,7 @@ the project whose environment files should be formatted:
 
 ```yaml
 repos:
-  - repo: https://github.com/cuongnbms/format-env
+  - repo: https://github.com/cuongtransc/format-env
     rev: v1.1.0
     hooks:
       - id: format-env
@@ -102,7 +118,7 @@ directory:
 
 ```yaml
 repos:
-  - repo: https://github.com/cuongnbms/format-env
+  - repo: https://github.com/cuongtransc/format-env
     rev: v1.1.0
     hooks:
       - id: format-env

@@ -49,7 +49,7 @@ description = "Read-only gate: format check, lint, tests"
 depends = ["fmt:check", "lint", "test"]
 run = "echo 'ci passed'"
 
-# Asset names must stay fenv_<os>_<arch>: `mise use github:cuongnbms/format-env`
+# Asset names must stay fenv_<os>_<arch>: `mise use github:cuongtransc/format-env`
 # picks the release asset by that suffix and installs it as `fenv`.
 [tasks.build]
 description = "Cross-compile release binaries into bin/"
