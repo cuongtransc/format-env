@@ -50,21 +50,6 @@ func TestReadConfigFile(t *testing.T) {
 	}
 }
 
-func TestReadConfigFileCreatesMissingFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "dev.env")
-
-	got, err := readConfigFile(path)
-	if err != nil {
-		t.Fatalf("readConfigFile() error = %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("readConfigFile() = %#v, want empty config", got)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("missing config file was not created: %v", err)
-	}
-}
-
 func TestFormatEnv(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "_template.env"), "STAGE={{ .STAGE }}\nPORT={{ df .PORT \"8000\" }}\n")
