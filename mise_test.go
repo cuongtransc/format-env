@@ -33,8 +33,8 @@ func taskBlocks(t *testing.T) map[string]string {
 		if header.MatchString(line) {
 			flush()
 			name, body = "", nil
-			if rest, ok := strings.CutPrefix(line, "[tasks."); ok {
-				name = strings.Trim(strings.TrimSuffix(rest, "]"), `"`)
+			if strings.HasPrefix(line, "[tasks.") {
+				name = strings.Trim(strings.TrimSuffix(strings.TrimPrefix(line, "[tasks."), "]"), `"`)
 			}
 			continue
 		}
@@ -131,7 +131,10 @@ func TestPreCommitHookRunsTheFastLevel(t *testing.T) {
 		if command == "exec mise run ci:fast" {
 			found = true
 		}
-		fields := strings.Fields(command)
+		// Split on shell separators so `mise run ci; exec …` is read as the
+		// heavier call it is, not as the token `ci;`.
+		separated := strings.NewReplacer(";", " ", "&", " ", "|", " ").Replace(command)
+		fields := strings.Fields(separated)
 		for i := 0; i+2 < len(fields); i++ {
 			if fields[i] != "mise" || fields[i+1] != "run" {
 				continue
