@@ -13,8 +13,8 @@ same steps: `gofmt -l .` has to come back empty (`fmt:check`), then `go vet ./..
 | Level | Runs | Cost |
 | --- | --- | --- |
 | `ci:fast` | `fmt:check`, `lint`, `test`, in that order; takes no machine slot | 0.41 / 0.34 / 0.33 s — 3 runs, 2026-11-25, ct-dev, warm build cache |
-| `ci` | `ci:fast` inside the machine slot | the same steps; one run, 2026-11-25, ct-dev |
-| `ci:full` | `ci` inside the machine slot | equal to `ci` |
+| `ci` | `ci:fast` inside the machine slot | the same steps in one slot run; not timed apart from `ci:full` |
+| `ci:full` | `ci` inside the machine slot | 0.47 s — one run, 2026-11-25, ct-dev, its own guards included |
 
 `ci:fast` starts with `.mise/lib/ci-slot --own-tree` and ends by marking that tree
 green (slot runtime version 4, the copy `ct ci install` writes). `ci` and
