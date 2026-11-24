@@ -111,13 +111,37 @@ func TestCILevelsDeclareNoDepends(t *testing.T) {
 }
 
 // The pre-commit hook runs the fast level; running a heavier one is the
-// finding DLV-002 names.
+// finding DLV-002 names. Comments do not count: a commented-out `ci:fast` with
+// a live `mise run ci` under it must still fail here.
 func TestPreCommitHookRunsTheFastLevel(t *testing.T) {
 	content, err := os.ReadFile(".githooks/pre-commit")
 	if err != nil {
 		t.Fatalf("read pre-commit hook: %v", err)
 	}
-	if hook := string(content); !strings.Contains(hook, "exec mise run ci:fast") {
-		t.Errorf("pre-commit hook does not run ci:fast:\n%s", hook)
+
+	found := false
+	for _, line := range strings.Split(string(content), "\n") {
+		command := strings.TrimSpace(line)
+		if command == "" || strings.HasPrefix(command, "#") {
+			continue
+		}
+		if comment := strings.Index(command, " #"); comment >= 0 {
+			command = strings.TrimSpace(command[:comment])
+		}
+		if command == "exec mise run ci:fast" {
+			found = true
+		}
+		fields := strings.Fields(command)
+		for i := 0; i+2 < len(fields); i++ {
+			if fields[i] != "mise" || fields[i+1] != "run" {
+				continue
+			}
+			if level := fields[i+2]; level == "ci" || level == "ci:full" {
+				t.Errorf("pre-commit hook runs %s; a hook stays on ci:fast", level)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("pre-commit hook does not run ci:fast:\n%s", string(content))
 	}
 }
