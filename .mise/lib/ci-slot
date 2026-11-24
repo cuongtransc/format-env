@@ -1,0 +1,731 @@
+#!/usr/bin/env python3
+# ci-slot version: 4
+# origin: ct-cli ct_cli/data/ci-slot — update with ct ci install; do not edit
+"""Hold a machine-wide slot, then run `mise run TASK` inside it (DLV-002 ci levels).
+
+The slot is a `flock` on `~/.cache/ci-slot/<k>.lock`, `k` in 1..N. The child
+inherits the descriptor, so the slot stays held while any process of the run is
+alive and the kernel releases it when the last one exits, SIGKILL included.
+
+    ci-slot TASK     wait for a slot, then run `mise run TASK` inside it
+    ci-slot --held   exit 0 if $CI_SLOT names a slot held now, or a pipeline runs
+    ci-slot --own-tree  exit 3 if the task was borrowed from a parent checkout
+    ci-slot --tree-hash  print a pre-run pin (export as CI_SLOT_GREEN_START)
+    ci-slot --mark-green TASK  record a pass only if the pre-run pin still matches
+    ci-slot --fresh TASK  exit 0 for an unchanged green tree on this OS, else 1
+
+ci:fast bodies start with --own-tree, then export
+CI_SLOT_GREEN_START="$(.mise/lib/ci-slot --tree-hash)" before any checks, and
+end with `.mise/lib/ci-slot --mark-green ci:fast`. Use one multiline run body
+so the export reaches the final command. Never mark after a failed check.
+
+A task is BORROWED when the command was typed inside a repo nested in the one the
+task runs in: mise searches parent directories for tasks, and `ct wt add` puts
+worktrees inside the main checkout, so a worktree lacking a level runs the main
+checkout's level on the main checkout's tree. `ci-slot TASK` refuses that before
+taking a slot; `ci:fast`, which takes none, starts with `ci-slot --own-tree`.
+Both first print the tree the level checks (`ci-slot: TASK checks ROOT @ SHA`), so a
+green names what it is about.
+
+Environment: CI_SLOT, CI_SLOT_JOBS, CI_SLOT_MAX_WAIT, CI_SLOT_ROOT (tests only),
+MISE_ORIGINAL_CWD (set by mise: where the command was typed).
+Pipeline detection: GITLAB_CI, GITHUB_ACTIONS or FORGEJO_ACTIONS; the generic CI
+is ignored, so a laptop shell that exports CI still queues.
+
+Exit status: the child's, a signal death as 128+N, 75 after CI_SLOT_MAX_WAIT,
+3 for a borrowed task, and 1 for this script's own setup errors.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import os
+import re
+import signal
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+PIPELINE_VARS = ('GITLAB_CI', 'GITHUB_ACTIONS', 'FORGEJO_ACTIONS')
+DEFAULT_SLOTS = 2
+DEFAULT_JOBS = '4'
+RETRY_SECONDS = 1.0
+ANNOUNCE_SECONDS = 30.0
+EXIT_GAVE_UP = 75
+EXIT_SETUP = 1
+EXIT_BORROWED = 3
+IDENTITY_VERSION = 4
+
+
+def _pipelines() -> bool:
+    """True when a non-generic pipeline variable is set."""
+    return any(os.environ.get(name) for name in PIPELINE_VARS)
+
+
+def _root() -> Path:
+    return Path(os.environ.get('CI_SLOT_ROOT') or Path.home() / '.cache' / 'ci-slot')
+
+
+def _positive_int(text: str, default: int) -> int:
+    try:
+        value = int(text.strip())
+    except (AttributeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _int_file(path: Path, default: int) -> int:
+    try:
+        return _positive_int(path.read_text(encoding='utf-8', errors='replace'), default)
+    except OSError:
+        return default
+
+
+def _jobs(root: Path) -> str:
+    inherited = (os.environ.get('CI_SLOT_JOBS') or '').strip()
+    if inherited:
+        return inherited
+    return str(_int_file(root / 'jobs', int(DEFAULT_JOBS)))
+
+
+def _fail(message: str) -> int:
+    print(f'ci-slot: {message}', file=sys.stderr)
+    return EXIT_SETUP
+
+
+def _toplevel(path: str | None) -> Path | None:
+    cmd = ['git', 'rev-parse', '--show-toplevel']
+    if path is not None:
+        cmd[1:1] = ['-C', path]
+    try:
+        done = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError:
+        return None
+    if done.returncode != 0 or not done.stdout.strip():
+        return None
+    return Path(done.stdout.strip())
+
+
+def own_tree(task: str) -> int:
+    """EXIT_BORROWED when the command was typed in a repo nested in this one; else 0.
+
+    Unknown either side (no MISE_ORIGINAL_CWD, not a repo) makes no claim.
+    """
+    typed = os.environ.get('MISE_ORIGINAL_CWD') or ''
+    if not typed:
+        return 0
+    here = _toplevel(None)
+    there = _toplevel(typed)
+    if here is None or there is None or there == here or here not in there.parents:
+        return 0
+    print(
+        f'ci-slot: refused: `{task}` is not defined in {there}; mise found it in the'
+        f' parent checkout {here} and would run it there, on that tree, so its result'
+        f' would say nothing about {there}. In {there}: `mise tasks ls` for the names'
+        ' this branch has, or merge the default branch into it.',
+        file=sys.stderr,
+    )
+    return EXIT_BORROWED
+
+
+def tree_line(task: str) -> None:
+    """Print which checkout and commit `task` checks; nothing outside a repo."""
+    root = _toplevel(None)
+    if root is None:
+        return
+    try:
+        head = subprocess.run(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            capture_output=True,
+            text=True,
+        )
+        # A hook's GIT_INDEX_FILE may be a partial-commit index: no claim then.
+        dirty = None
+        if not os.environ.get('GIT_INDEX_FILE'):
+            dirty = subprocess.run(
+                ['git', '--no-optional-locks', 'status', '--porcelain', '-uno'],
+                capture_output=True,
+                text=True,
+            )
+    except OSError:
+        return
+    sha = head.stdout.strip() if head.returncode == 0 else 'no commit'
+    mark = ' (uncommitted changes)' if dirty and dirty.stdout.strip() else ''
+    print(f'ci-slot: {task} checks {root} @ {sha}{mark}', file=sys.stderr, flush=True)
+
+
+def held() -> int:
+    """0 when this process runs inside a held slot or a pipeline; else 1."""
+    if _pipelines():
+        return 0
+    value = os.environ.get('CI_SLOT') or ''
+    if not value.isdigit():
+        return 1
+    path = _root() / f'{value}.lock'
+    if not path.exists():
+        return 1
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return 1
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return 1
+    finally:
+        os.close(fd)
+
+
+def _stamp(fd: int, task: str) -> None:
+    """Record who holds the slot, for the queue display only."""
+    try:
+        repo = Path.cwd().name
+    except OSError:
+        repo = '?'
+    line = f'{os.getpid()} {repo} {task} {int(time.time())}\n'
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, line.encode())
+
+
+def _holders(root: Path, count: int) -> str:
+    """`<repo> <task> <elapsed>s, …` for every taken slot."""
+    now = int(time.time())
+    parts: list[str] = []
+    for k in range(1, count + 1):
+        try:
+            fields = (root / f'{k}.lock').read_text().split()
+        except OSError:
+            continue
+        if len(fields) < 4:
+            parts.append(f'slot {k}')
+            continue
+        repo, task, started = fields[1], fields[2], _positive_int(fields[3], now)
+        parts.append(f'{repo} {task} {max(now - started, 0)}s')
+    return ', '.join(parts) or 'unknown'
+
+
+def _git_dir() -> Path | None:
+    try:
+        done = subprocess.run(
+            ['git', 'rev-parse', '--absolute-git-dir'],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if done.returncode != 0 or not done.stdout.strip():
+        return None
+    return Path(done.stdout.strip())
+
+
+def _lstart(pid: int) -> str:
+    env = {**os.environ, 'TZ': 'UTC', 'LC_ALL': 'C', 'LANG': 'C'}
+    try:
+        done = subprocess.run(
+            ['ps', '-p', str(pid), '-o', 'lstart='],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except OSError:
+        return ''
+    return done.stdout.strip()
+
+
+def _write_marker() -> Path | None:
+    """`$(git rev-parse --absolute-git-dir)/ct-gate-waiters/<pid>`; cta reads it."""
+    git_dir = _git_dir()
+    if git_dir is None:
+        return None
+    folder = git_dir / 'ct-gate-waiters'
+    marker = folder / str(os.getpid())
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f'{os.getpid()}\n{_lstart(os.getpid())}\n')
+    except OSError:
+        return None
+    return marker
+
+
+def _try_claim(root: Path, count: int, task: str) -> tuple[int, int] | None:
+    for k in range(1, count + 1):
+        fd = os.open(root / f'{k}.lock', os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            continue
+        _stamp(fd, task)
+        return fd, k
+    return None
+
+
+def _abort(signum: int, _frame: object) -> None:
+    """Raise instead of dying, so a queued waiter still removes its marker."""
+    raise SystemExit(128 + signum)
+
+
+def claim(root: Path, count: int, task: str) -> tuple[int, int] | None:
+    """The first free slot as (fd, k), or None after CI_SLOT_MAX_WAIT seconds."""
+    raw = (os.environ.get('CI_SLOT_MAX_WAIT') or '').strip()
+    max_wait = _positive_int(raw, 0) if raw else 0
+    deadline = time.monotonic() + max_wait if max_wait else None
+    marker: Path | None = None
+    announced = 0.0
+    previous = {sig: signal.signal(sig, _abort) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                print(
+                    f'ci-slot: gave up after {max_wait} s waiting for a slot',
+                    file=sys.stderr,
+                )
+                return None
+            taken = _try_claim(root, count, task)
+            if taken is not None:
+                return taken
+            if marker is None:
+                marker = _write_marker()
+            now = time.monotonic()
+            if not announced or now - announced >= ANNOUNCE_SECONDS:
+                announced = now
+                print(
+                    f'ci: waiting for a slot (holders: {_holders(root, count)})',
+                    file=sys.stderr,
+                    flush=True,
+                )
+            time.sleep(RETRY_SECONDS)
+    finally:
+        if marker is not None:
+            marker.unlink(missing_ok=True)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _forward(signum: int, child: subprocess.Popen[str]) -> None:
+    if child.poll() is None:
+        try:
+            child.send_signal(signum)
+        except ProcessLookupError:
+            pass
+
+
+def _git_bytes(root: Path, *args: str) -> bytes:
+    return subprocess.run(
+        ['git', '-C', str(root), *args], capture_output=True, check=True,
+    ).stdout
+
+
+def _status_paths(chunk: bytes) -> tuple[bytes | None, bool]:
+    """(path, has an original path following) for one porcelain-v2 -z record."""
+    kind = chunk[:1]
+    if kind == b'?':
+        return chunk[2:], False
+    fields = {b'1': 8, b'2': 9, b'u': 10}
+    if kind not in fields:
+        raise ValueError(f'unknown status record {chunk[:2]!r}')
+    parts = chunk.split(b' ', fields[kind])
+    if len(parts) <= fields[kind]:
+        raise ValueError(f'truncated status record {chunk[:2]!r}')
+    return parts[fields[kind]], kind == b'2'
+
+
+def _index_listing(root: Path) -> bytes:
+    """Mode, blob, stage and path of every tracked entry, plus its index flags.
+
+    Content the index hides behind `assume-unchanged` or `skip-worktree` is
+    invisible to `git status` and to the hooks it feeds, so a cache over it would
+    claim a green for bytes no check read: refuse instead.
+    """
+    listing = _git_bytes(root, 'ls-files', '-s', '-v', '-z')
+    for row in listing.split(b'\0'):
+        if row and (row[:1].islower() or row[:1] == b'S'):
+            raise ValueError(
+                'this index hides files (assume-unchanged or skip-worktree),'
+                ' so no tree identity can name what ci:fast checked'
+            )
+    return listing
+
+
+def _hash_file(root: bytes, raw: bytes, digest: 'hashlib._Hash') -> None:
+    """Mode and actual bytes: Git filters (CRLF, clean) must not hide a change."""
+    path = os.path.join(root, raw)
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        digest.update(b'deleted\0')
+        return
+    digest.update(str(stat.S_IFMT(mode) | (mode & 0o111)).encode() + b'\0')
+    if stat.S_ISLNK(mode):
+        digest.update(os.readlink(path) + b'\0')
+    elif stat.S_ISREG(mode):
+        with open(path, 'rb') as source:
+            # The vendored script runs on the OS python3, which may be 3.10 even
+            # when the mise task uses a newer interpreter (hashlib.file_digest is
+            # 3.11+). Stream so a large untracked artifact never has to fit in RAM.
+            content = hashlib.sha256()
+            while True:
+                block = source.read(262144)
+                if not block:
+                    break
+                content.update(block)
+            digest.update(content.digest())
+    else:
+        raise ValueError(f'cannot hash non-file {os.fsdecode(raw)}')
+
+
+def _venv_roots() -> list[str]:
+    """A venv counts even when it was never activated: ask the interpreter."""
+    roots = [os.environ['VIRTUAL_ENV']] if os.environ.get('VIRTUAL_ENV') else []
+    base = getattr(sys, 'base_prefix', sys.prefix)
+    if sys.prefix != base:
+        roots.append(sys.prefix)
+    return roots
+
+
+def _tool_identity() -> bytes:
+    """Pin executable versions without starting a type checker just to ask its version.
+
+    Resolved installation path and inode/size/mtime/ctime change on upgrades, even
+    inside an ignored virtualenv. Include distribution metadata for Python tools
+    whose launcher stays put during a package upgrade. Extra task-specific tools
+    can be named in CI_SLOT_GREEN_TOOLS (space-separated names or absolute paths).
+    """
+    names = set(('python', 'python3', 'ruff', 'mypy', 'node', 'npm', 'go', 'cargo', 'rustc'))
+    names.update(os.environ.get('CI_SLOT_GREEN_TOOLS', '').split())
+    rows: list[bytes] = []
+    for name in sorted(names):
+        candidates = [name] if '/' in name else [
+            os.path.join(folder, name) for folder in os.get_exec_path()
+        ]
+        for candidate in candidates:
+            if not os.access(candidate, os.X_OK) or not os.path.isfile(candidate):
+                continue
+            resolved = os.path.realpath(candidate)
+            info = os.stat(resolved)
+            rows.append(os.fsencode(resolved) + repr((info.st_ino, info.st_size,
+                        info.st_mtime_ns, info.st_ctime_ns)).encode())
+            break
+    for venv in _venv_roots():
+        for metadata in sorted(Path(venv).glob('lib/python*/site-packages/*.dist-info/METADATA')):
+            info = metadata.stat()
+            rows.append(os.fsencode(metadata) + repr((info.st_size, info.st_mtime_ns,
+                        info.st_ctime_ns)).encode())
+    return b'\0'.join(rows)
+
+
+def _common_dir(root: Path) -> Path | None:
+    """Git's common dir from the layout alone: one call less on the per-turn path.
+
+    `.git` is a directory (normal repo), or a file naming the git dir (a linked
+    worktree, whose dir holds `commondir`, or a submodule, whose dir is its own).
+    Returns None when the layout is not the one Git writes.
+    """
+    dot = root / '.git'
+    try:
+        if dot.is_dir():
+            return dot
+        line = dot.read_text().strip()
+        if not line.startswith('gitdir:'):
+            return None
+        git_dir = Path(line[len('gitdir:'):].strip())
+        git_dir = git_dir if git_dir.is_absolute() else (root / git_dir)
+        common = git_dir / 'commondir'
+        if common.is_file():
+            value = Path(common.read_text().strip())
+            return value if value.is_absolute() else (git_dir / value).resolve()
+        return git_dir
+    except OSError:
+        return None
+
+
+def _normalizing_attributes(root: Path, listing: bytes, touched: list[bytes]) -> bool:
+    """True when Git may convert a file's bytes, which hides even a same-size edit.
+
+    Git reads attributes from a `.gitattributes` in the tree (tracked or not — status
+    names the untracked ones), `$GIT_DIR/info/attributes`, `core.attributesFile`, the
+    system file and the XDG one, and `core.autocrlf` applies to every text file. A
+    `filter.*` driver only acts where attributes ask for it, so its mere presence is
+    no reason to slow a check down. One config call and a few stats.
+    """
+    names = [row.split(b'\t', 1)[-1] for row in listing.split(b'\0') if row] + touched
+    if any(name.rsplit(b'/', 1)[-1] == b'.gitattributes' for name in names):
+        return True
+    configured = subprocess.run(
+        ['git', '-C', str(root), 'config', '--get-regexp',
+         r'^core\.(autocrlf|attributesfile)$'],
+        capture_output=True,
+    )
+    if configured.returncode not in (0, 1):
+        raise ValueError('cannot read Git normalization settings')
+    locations: list[Path] = []
+    # Bytes, not text: a configured path need not be valid UTF-8.
+    for line in configured.stdout.splitlines():
+        key, _, value = line.partition(b' ')
+        value = value.strip()
+        if key == b'core.autocrlf' and value.lower() not in (b'', b'false', b'no', b'0'):
+            return True
+        if key == b'core.attributesfile' and value:
+            path = Path(os.fsdecode(value)).expanduser()
+            # Git resolves a relative value against the directory it runs in; we
+            # run it with `-C root`.
+            locations.append(path if path.is_absolute() else root / path)
+    common = _common_dir(root)
+    if common is not None:
+        locations.append(common / 'info/attributes')
+    else:
+        info = _git_bytes(root, 'rev-parse', '--git-path', 'info/attributes')
+        locations.append(root / os.fsdecode(info.strip()))
+    locations.append(Path(os.environ.get('GIT_ATTR_SYSTEM') or '/etc/gitattributes'))
+    xdg = os.environ.get('XDG_CONFIG_HOME')
+    locations.append(Path(xdg) / 'git/attributes' if xdg else
+                     Path.home() / '.config/git/attributes')
+    return any(location.is_file() for location in locations)
+
+
+def _submodules(root: Path, listing: bytes) -> list[bytes]:
+    """Paths the index holds as gitlinks, whatever the worktree now has there."""
+    return [
+        row.split(b'\t', 1)[1]
+        for row in listing.split(b'\0')
+        if row and row[2:8] == b'160000' and b'\t' in row
+    ]
+
+
+def tree_hash(
+    root: Path, *, same_toolchain: bool = False, seen: frozenset[str] = frozenset()
+) -> str:
+    """The content identity a green claims: every tracked blob and every byte Git saw move.
+
+    `git status` reports a worktree file as modified whenever its stat differs from
+    the index, even when a filter would normalize the change away (CRLF, `text`),
+    so those paths also get their raw bytes hashed; untouched files contribute the
+    index listing. Untracked (never ignored) files are hashed whole. Status, not the
+    patch, decides what changed; a submodule is hashed recursively because its
+    gitlink alone does not name the content inside it.
+    """
+    real = os.path.realpath(root)
+    if real in seen:
+        raise ValueError(f'submodule layout loops through {real}')
+    seen = seen | {real}
+    raw = os.fsencode(root)
+    # `--no-optional-locks`: refreshing the index in place costs ~40 ms on a large
+    # tree and a check must not rewrite the index it reads.
+    status = _git_bytes(
+        root, '--no-optional-locks', '-c', 'core.checkStat=default',
+        '-c', 'core.trustctime=true', '-c', 'core.fsmonitor=false',
+        '-c', 'core.fileMode=true', 'status', '--porcelain=v2', '-z',
+        '--untracked-files=all', '--ignored=no',
+    )
+    listing = _index_listing(root)
+    digest = hashlib.sha256(f'ci-slot tree {IDENTITY_VERSION}\n'.encode())
+    if not same_toolchain:
+        digest.update(_tool_identity())
+    touched: list[bytes] = []
+    chunks = status.split(b'\0')
+    number = 0
+    while number < len(chunks):
+        chunk = chunks[number]
+        number += 1
+        if not chunk or chunk[:1] == b'#':
+            continue
+        digest.update(chunk + b'\0')
+        path, renamed = _status_paths(chunk)
+        if renamed:
+            digest.update(chunks[number] + b'\0')
+            number += 1
+        if not path:
+            continue
+        target = os.path.join(raw, path)
+        if os.path.isdir(target) and not os.path.islink(target):
+            continue  # a submodule: hashed below, from the index listing
+        _hash_file(raw, path, digest)
+        touched.append(path)
+    digest.update(listing)
+    for path in _submodules(root, listing):
+        target = os.path.join(raw, path)
+        if os.path.islink(target) or not os.path.isdir(target):
+            continue  # a gitlink replaced by a file or link: the record hashed it
+        if os.path.exists(os.path.join(target, b'.git')):
+            digest.update(
+                tree_hash(
+                    Path(os.fsdecode(target)), same_toolchain=True, seen=seen
+                ).encode()
+            )
+        else:
+            digest.update(b'uninitialized\0')
+    if _normalizing_attributes(root, listing, touched):
+        # Without attributes, status+index cover raw bytes via Git's stat cache.
+        # With attributes, even a clean status can hide bytes: hash them all.
+        for row in listing.split(b'\0'):
+            if not row:
+                continue
+            header, path = row.split(b'\t', 1)
+            if header[2:8] == b'160000':
+                continue
+            digest.update(path + b'\0')
+            _hash_file(raw, path, digest)
+    return digest.hexdigest()
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Replace the stamp whole: a reader never sees half a record."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f'.{path.name}.{os.getpid()}')
+    try:
+        temporary.write_text(text)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_stamp(path: Path) -> dict[str, str]:
+    """`key value` lines, `#` comments ignored; unreadable means no record."""
+    record: dict[str, str] = {}
+    try:
+        text = path.read_text()
+    except OSError:
+        return record
+    for line in text.splitlines():
+        key, _, value = line.partition(' ')
+        if key and not key.startswith('#') and value:
+            record[key] = value
+    return record
+
+
+def _repo_paths() -> tuple[Path | None, Path | None]:
+    """(toplevel, git dir) in one Git call: the fresh path runs on every turn."""
+    done = subprocess.run(
+        ['git', 'rev-parse', '--show-toplevel', '--absolute-git-dir'],
+        capture_output=True, text=True,
+    )
+    if done.returncode:
+        return None, None
+    lines = done.stdout.splitlines()
+    if len(lines) < 2:
+        return None, None
+    return Path(lines[0]), Path(lines[1])
+
+
+def green_command(argv: list[str]) -> int:
+    """A green is written only for the explicit pre-run pin, on this OS."""
+    try:
+        root, git_dir = _repo_paths()
+        if root is None or git_dir is None:
+            raise ValueError('not a git worktree')
+        if argv != ['--tree-hash'] and (
+            len(argv) != 2 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9:_.-]*', argv[1])
+        ):
+            raise ValueError('expected a simple task name')
+        identity = tree_hash(root)
+        if argv == ['--tree-hash']:
+            print(identity)
+            return 0
+        stamp = git_dir / 'ct-green' / argv[1]
+        if argv[0] == '--fresh':
+            if os.environ.get('CI_NO_CACHE'):
+                return _fail('CI_NO_CACHE is set: nothing is fresh')
+            record = _read_stamp(stamp)
+            return 0 if (
+                record.get('os') == sys.platform
+                and record.get('version') == str(IDENTITY_VERSION)
+                and record.get('hash') == identity
+            ) else 1
+        pin = os.environ.get('CI_SLOT_GREEN_START', '')
+        if not pin or pin != identity:
+            raise ValueError(
+                'the tree changed during the run, or CI_SLOT_GREEN_START is missing;'
+                ' record nothing rather than a green ci:fast never checked'
+            )
+        _write_atomic(
+            stamp,
+            f'# ci-green {argv[1]} — .mise/lib/ci-slot --mark-green;'
+            ' delete this file to force the next run\n'
+            f'os {sys.platform}\nversion {IDENTITY_VERSION}\nhash {identity}\n',
+        )
+        return 0
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        if argv[0] != '--fresh':
+            return _fail(str(exc))
+        return 1
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ('-h', '--help'):
+        print(__doc__.strip())
+        return 0
+    if argv[0] == '--held':
+        return held()
+    if argv[0] == '--own-tree':
+        name = os.environ.get('MISE_TASK_NAME') or 'this task'
+        if own_tree(name):
+            return EXIT_BORROWED
+        tree_line(name)
+        return 0
+    if argv[0] in ('--tree-hash', '--mark-green', '--fresh'):
+        return green_command(argv)
+    task = argv[0]
+    if own_tree(task):
+        return EXIT_BORROWED
+    tree_line(task)
+
+    if _pipelines():
+        os.environ['CI_SLOT'] = 'pipeline'
+        os.environ.setdefault('CI_SLOT_JOBS', DEFAULT_JOBS)
+        try:
+            os.execvp('mise', ['mise', 'run', task])
+        except OSError as exc:
+            return _fail(f'cannot run mise: {exc}')
+        raise AssertionError('unreachable: execvp returned')
+
+    root = _root()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return _fail(f'cannot create {root}: {exc}')
+    count = _int_file(root / 'slots', DEFAULT_SLOTS)
+    env = {**os.environ, 'CI_SLOT_JOBS': _jobs(root)}
+
+    try:
+        taken = claim(root, count, task)
+    except OSError as exc:
+        return _fail(str(exc))
+    if taken is None:
+        return EXIT_GAVE_UP
+    fd, k = taken
+    os.set_inheritable(fd, True)
+    env['CI_SLOT'] = str(k)
+    # Installed before the spawn: a SIGTERM in that window is replayed once the
+    # child exists, instead of killing the wrapper and orphaning the run.
+    child: subprocess.Popen[str] | None = None
+    pending: list[int] = []
+
+    def _relay(signum: int, _frame: object) -> None:
+        if child is None:
+            pending.append(signum)
+        else:
+            _forward(signum, child)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, _relay)
+    try:
+        child = subprocess.Popen(['mise', 'run', task], pass_fds=(fd,), env=env)
+    except OSError as exc:
+        os.close(fd)
+        return _fail(f'cannot run mise: {exc}')
+    for signum in pending:
+        _forward(signum, child)
+    status = child.wait()
+    os.close(fd)
+    return 128 - status if status < 0 else status
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

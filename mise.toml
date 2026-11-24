@@ -18,7 +18,7 @@ else
 fi
 echo
 echo 'Setup complete. Next:'
-echo '  mise run ci      the gate, also runs on pre-commit'
+echo '  mise run ci:fast  the fast gate, also runs on pre-commit'
 """
 
 [tasks.test]
@@ -44,10 +44,40 @@ if [ -n "$unformatted" ]; then
 fi
 """
 
+# The three DLV-002 levels share one check set: the whole suite runs in about a
+# second, so there is nothing for a heavier level to add (CLAUDE.md, ## CI levels).
+# The steps live in the body, never `depends`: the first line is the ci-slot guard
+# and a dependency would run before it.
+[tasks."ci:fast"]
+# `ct ci install` wrote .mise/lib/ci-slot; the pin and the green stamp are its v4 body.
+description = "Fast level: gofmt check, go vet, tests; pre-commit runs it"
+run = '''
+.mise/lib/ci-slot --own-tree
+set -e
+export CI_SLOT_GREEN_START="$(.mise/lib/ci-slot --tree-hash)"
+mise run fmt:check
+mise run lint
+mise run test
+.mise/lib/ci-slot --mark-green ci:fast
+'''
+
 [tasks.ci]
-description = "Read-only gate: format check, lint, tests"
-depends = ["fmt:check", "lint", "test"]
-run = "echo 'ci passed'"
+# Run once when the change is done; the guard re-enters this task inside a slot.
+description = "Change level: the fast checks and every test, once per change"
+run = '''
+[ -n "${CI_SLOT:-}" ] || exec .mise/lib/ci-slot ci
+set -e
+mise run ci:fast
+'''
+
+[tasks."ci:full"]
+# Equal to `ci` until this repo has a check that is too heavy for it.
+description = "Full level: the same checks and tests, in a slot; `ci` equals it"
+run = '''
+[ -n "${CI_SLOT:-}" ] || exec .mise/lib/ci-slot ci:full
+set -e
+mise run ci
+'''
 
 # Asset names must stay fenv_<os>_<arch>: `mise use github:cuongtransc/format-env`
 # picks the release asset by that suffix and installs it as `fenv`.
