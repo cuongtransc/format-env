@@ -45,10 +45,10 @@ BIN_DIR=$HOME/bin mise run cli:install  # any other directory you can write to
 
 # Development
 ```sh
-mise run setup   # enable the pre-commit gate (once after cloning)
-mise run ci      # gofmt check, go vet, tests
-mise run fmt     # rewrite sources with gofmt
-mise run build   # release binaries in bin/
+mise run setup    # enable the pre-commit gate (once after cloning)
+mise run ci:fast  # gofmt check, go vet, tests; the pre-commit gate runs it
+mise run fmt      # rewrite sources with gofmt
+mise run build    # release binaries in bin/
 ```
 # Usage
 

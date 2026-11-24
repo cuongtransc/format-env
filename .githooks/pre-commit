@@ -5,4 +5,4 @@
 for v in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
   unset "$v"
 done
-exec mise run ci
+exec mise run ci:fast
